@@ -1,0 +1,22 @@
+package:
+  name: eups
+  version: 1.5.9
+
+source:
+  git_tag: 1.5.9
+  git_url: https://github.com/RobertLuptonTheGood/eups
+
+requirements:
+  build:
+    - python
+
+  run:
+    - python
+
+test:
+  imports:
+    - eups
+
+about:
+  home: //github.com/RobertLuptonTheGood/eups
+  license: GPLv2
