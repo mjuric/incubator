@@ -3,31 +3,32 @@
 #export PREFIX="$PREFIX/bbb"
 mkdir -p $PREFIX
 
-#./configure --prefix="$PREFIX" --with-eups="$PREFIX/stack" --with-python="$PYTHON"
-./configure --prefix="$PREFIX" --with-eups="$PREFIX/opt/eups-stack" --with-python="$PYTHON"
+#
+# configure & build
+#
+./configure --prefix="$PREFIX/opt/eups" --with-eups="$PREFIX/var/opt/eups" --with-python="$PYTHON"
 make
 
-#make install
-mkdir -p "$PREFIX/bin"
-mkdir -p "$PREFIX"/share/eups
+#
+# install
+#
+make install
+chmod -R u+w "$PREFIX/opt/eups"
 
-cp -a bin/{eups,eups_impl.py,eups_setup,eups_setup_impl.py,eupspkg,pkgautoversion}  "$PREFIX"/bin
-cp -a bin/setups* "$PREFIX"/share/eups
+# Link binaries into bin
+#for script in "$PREFIX/opt/eups/bin"/{eups,eupspkg,pkgautoversion,eups_setup}; do
+#	ln -s "$script" "$PREFIX/bin/"
+#done
 
-# Install architecture-independent files
-cp -a README Release_Notes "$PREFIX"/share/eups
-cp -a doc "$PREFIX"/share/eups
-cp -a etc "$PREFIX"/share/eups; rm -f "$PREFIX"/share/eups/etc/Makefile
-cp -a lib "$PREFIX"/share/eups
-cp -a ups "$PREFIX"/share/eups
-cp -a site "$PREFIX"/share/eups
+# Link setup scripts into bin
+for script in "$PREFIX/opt/eups/bin"/setups.*; do
+	name=$(basename $script)
+	ln -s "$script" "$PREFIX/bin/eups-$name"
+done
 
-# Install Python modules
+# Link Python modules into python library dir
 mkdir -p "$SP_DIR"
-cp -a python/eups "$SP_DIR/"
-
-# Create default stack directory
-mkdir -p "$PREFIX/opt/eups-stack/ups_db"
+ln -s "$PREFIX/python/eups" "$SP_DIR/"
 
 # Hardcode EUPS_DIR into scripts
 insert_eups_dir()
@@ -35,15 +36,17 @@ insert_eups_dir()
 	# Insert an explicit EUPS_DIR export
 
 	head -n 1 "$1" > "$1.tmp"
-	echo "export EUPS_DIR='$PREFIX'" >> "$1.tmp"
+	echo "export EUPS_DIR='$PREFIX/opt/eups'" >> "$1.tmp"
 	tail -n +2 "$1" >> "$1.tmp"
+	touch -r "$1" "$1.tmp"
+	test -x "$1" && chmod +x "$1.tmp"
 	mv "$1.tmp" "$1"
 	
 	echo "Injected EUPS_DIR into $1"
 }
-for script in eups eups_setup eupspkg pkgautoversion; do
-	insert_eups_dir "$PREFIX/bin/$script"
-done
+#for script in eups eups_setup eupspkg pkgautoversion; do
+#	insert_eups_dir "$PREFIX/opt/eups/bin/$script"
+#done
 
 # Fix hardcoded paths
 #sed -i .backup "s|#!$PYTHON|#!/usr/bin/env python|" "$PREFIX"/bin/*
@@ -51,6 +54,6 @@ done
 #rm "$PREFIX"/bin/*.backup
 
 export
-#exit -1
+exit -1
 #ls -l $PREFIX/python
 #ls -lRt $SP_DIR
