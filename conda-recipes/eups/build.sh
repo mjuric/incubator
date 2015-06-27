@@ -22,6 +22,7 @@ make
 #
 make install
 chmod -R u+w "$PREFIX/opt/eups"
+echo "Database of EUPS-built products" > "$PREFIX/var/opt/eups/ups_db/README"
 
 #
 # Link only the setup scripts into bin
