@@ -35,7 +35,8 @@ lsst_prefix="lsst-"
 # A specific mapping between an EUPS product name and Conda product name. Takes
 # precedence over automatic prefixing.
 eups_to_conda_map = {
-	"legacy_configs": "legacy_configs",
+	'legacy_configs':	'legacy_configs',
+	'lsst':			lsst_prefix + 'eups-environment',
 }
 
 # Missing dependencies (these would be transparently installed with pip otherwise)
@@ -49,7 +50,13 @@ missing_deps = { # map of conda_name -> [ (pkgtype, conda_name), ... ]
 	'stsci.distutils'          : [('pypi', 'd2to1')],	# needed by pyfits
 }
 
-# Override sha1s
+# The EUPS tags to apply to all products build in this run
+# You should always leave 'current' (unless you know what you're doing)
+# You should also leave 'conda', to allow the user to see right away that this
+# is a Conda-installed and managed EUPS product
+eups_tags = [ 'current', 'conda', 'maf_b1467' ]
+
+# Override sha1s -- these are temporary hacks until the fixes below get merged
 override_gitrev = {
 	'sconsUtils':    'u/mjuric/relocation-fixes',
 	'webservcommon': 'u/mjuric/DM-2993-never-depend-on-anaconda',
@@ -157,7 +164,8 @@ def gen_conda_package(product, sha, eups_version, eups_deps):
 	setups = SEP + ('\n'+SEP).join(setups) if setups else ''
 
 	fill_out_template(os.path.join(dir, 'build.sh'), 'build.sh.template',
-		setups = setups
+		setups = setups,
+		eups_tags = ' '.join(eups_tags)
 	)
 
 	# deduce the build string
@@ -263,12 +271,29 @@ def load_manifest(fn):
 		yield (product, sha, version, deps)
 
 if __name__ == "__main__":
-	# Generate conda package files and build driver script
-	products = OrderedDict()
-	os.makedirs(output_dir)
 
-	# construct the packages
+	# Load the manifest
+	products = {}
 	for (product, sha, version, deps) in load_manifest('b1467.txt'):
+		products[product] = (product, sha, version, deps)
+
+	# Extract the products of interest (and their dependencies)
+	manifest = OrderedDict()
+	def bottom_up_add_to_manifest(product):
+		(product, sha, version, deps) = products[product]
+		for dep in deps:
+			bottom_up_add_to_manifest(dep)
+		if product not in manifest:
+			manifest[product] = products[product]
+
+	top_level = [ 'sims_maf' ]
+	for product in top_level:
+		bottom_up_add_to_manifest(product)
+
+	# Generate conda package files and build driver script
+	os.makedirs(output_dir)
+	products = OrderedDict()
+	for (product, sha, version, deps) in manifest.itervalues():
 		if product in internal_products: continue
 		if product in skip_products: continue
 
@@ -289,4 +314,5 @@ if __name__ == "__main__":
 				comment = ''
 			conda_version = "%s-%s_%s" % (pi.version, pi.build_string, pi.buildnum)
 			print >>fp, comment + "rebuild %s %s %s %s" % (pi.conda_name, conda_version, pi.product, pi.eups_version)
-	os.chmod(rebuild_sh, 0755)
+		print >>fp, "cat %(output_dir)s/*/binstar-upload.sh > %(output_dir)s/binstar-upload.sh" % { 'output_dir' : output_dir }
+		print >>fp, "echo \"To upload to anaconda.org, run 'bash %s/binstar-upload.sh'\"" % (output_dir)

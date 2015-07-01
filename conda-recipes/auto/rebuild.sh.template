@@ -27,6 +27,9 @@ rebuild()
 			echo 'ERROR'
 			exit -1
 		fi
+
+		echo -n "binstar upload " > binstar-upload.sh
+		conda build . --output >> binstar-upload.sh
 	fi
 	
 	popd > /dev/null
