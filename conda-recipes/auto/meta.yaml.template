@@ -18,6 +18,7 @@ source:
 
 build:
   number: %(buildnum)s
+  string: %(string)s
 
 requirements:
   build:

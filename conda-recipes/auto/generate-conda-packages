@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-import os, os.path, shutil, subprocess
-import conda_api
+import os, os.path, shutil, subprocess, re
 from collections import OrderedDict, namedtuple
 
 def conda_name_for(product):
@@ -50,6 +49,10 @@ missing_deps = { # map of conda_name -> [ (pkgtype, conda_name), ... ]
 	'stsci.distutils'          : [('pypi', 'd2to1')],	# needed by pyfits
 }
 
+# Parsers for versions that cannot be parsed otherwise
+special_version_parsers = { # map of eups_product_name -> [ parser_function1, parser_function2, ... ]
+}
+
 # The EUPS tags to apply to all products build in this run
 # You should always leave 'current' (unless you know what you're doing)
 # You should also leave 'conda', to allow the user to see right away that this
@@ -68,16 +71,76 @@ override_gitrev = {
 
 ProductInfo = namedtuple('ProductInfo', ['conda_name', 'version', 'build_string', 'buildnum', 'product', 'eups_version', 'deps'])
 
-def eups_to_conda_version(version):
+def eups_to_conda_version(product, eups_version):
 	# Convert EUPS version string to Conda-compatible pieces
-	if '+' in version:
-		version, buildnum = version.split('+')
+	#
+	# Conda version has three parts:
+	#	version number: a version number that should be PEP 386 compliant (though Conda's impl. is buggy)
+	#	build string: not used in version comparison, can be anything
+	#	build number: if two versions are equal, build number is used to break the tie
+	# Conda also doesn't like '+' nor '-' in versions
+	#  Furthermore, it parses the version itself as described in the regex at:
+	#     https://github.com/conda/conda/blob/master/conda/verlib.py
+	#  which should be PEP 386 compliant (and very limited). We do our best here to fit into that straitjacket.
+
+	# Split into version + build number
+	if '+' in eups_version:
+		raw_version, buildnum = eups_version.split('+')
 	else:
-		buildnum = 0
+		raw_version, buildnum = eups_version, 0
+
+	# Parse EUPS version:
+	# Possibilities to detect:
+	#	<vername>-<tagdist>-g<sha1>		-> (<vername>.<tagdist>, <buildnum>_<sha1>, <buildnum>)
+	#          <vername> can be <version>.lsst<N>	->   <vername>.<N>
+	#	<branch>-g<sha1>			-> (<branch>_g<sha1>, <buildnum>_<sha1>, <buildnum>)
+	#	<something_completely_different>	-> (<something_completely_different>, '', <buildnum>)
+	#
+
+	def parse_full_version(version):	
+		match = re.match('^([^-]+)-([0-9]+)-g([0-9a-z]+)$', version)
+		if not match: return None, None
+
+		vername, tagdist, sha1  = match.groups()
+
+		# handle 1.2.3.lsst5 --> 1.2.3.5
+		fixed_ver, _ = parse_lsst_patchlevel(vername)
+		if fixed_ver is not None:
+			vername = fixed_ver
+
+		return "%s.%s" % (vername, tagdist), "%s_%s" % (buildnum, sha1)
+
+	def parse_lsst_patchlevel(version):
+		# handle 1.2.3.lsst5 --> 1.2.3.5
+		match = re.match(r'^(.*?).?lsst([0-9]+)$', version)
+		if not match: return None, None
+
+		true_ver, lsst_patch = match.groups()
+		return "%s.%s" % (true_ver, lsst_patch), 'build_%s' % buildnum
+
+	def parse_branch_sha1(version):
+		match = re.match('^([^-]+)-g([0-9a-z]+)$', version)
+		if not match: return None, None
+
+		branch, sha1 = match.groups()
+		return "%s_g%s" % (branch, sha1), "%s_%s" % (buildnum, sha1)
+
+	def parse_default(version):
+		return version, 'build_%s' % buildnum
+
+	parsers  = special_version_parsers.get(product, [])
+	parsers += [ parse_full_version, parse_lsst_patchlevel, parse_branch_sha1, parse_default ]
+	for parser in parsers:
+		version, build_string = parser(raw_version)
+		if version is not None:
+			break
+
+	# remove any remaining '-'
 	if '-' in version:
 		version = version.replace('-', '_')
 
-	return version, buildnum
+#	print eups_version, " -> ", (version, build_string, buildnum)
+	return version, build_string, buildnum
 
 def conda_version_spec(conda_name):
 	pi = products[conda_name]
@@ -136,7 +199,7 @@ def gen_conda_package(product, sha, eups_version, eups_deps):
 	giturl = 'https://github.com/LSST/%s' % (product)
 
 	# convert to conda version
-	version, buildnum = eups_to_conda_version(eups_version)
+	version, build_string, buildnum = eups_to_conda_version(product, eups_version)
 
 
 	#
@@ -152,6 +215,7 @@ def gen_conda_package(product, sha, eups_version, eups_deps):
 		productNameLowercase = conda_name.lower(),
 		version = version,
 		buildnum = buildnum,
+		string = build_string,
 		gitrev = sha,
 		giturl = giturl,
 		build_req = reqstr,
@@ -167,9 +231,6 @@ def gen_conda_package(product, sha, eups_version, eups_deps):
 		setups = setups,
 		eups_tags = ' '.join(eups_tags)
 	)
-
-	# deduce the build string
-	build_string = 'np19py27' if 'numpy' in deps else 'py27'
 
 	# record we've seen this product
 	products[conda_name] = ProductInfo(conda_name, version, build_string, buildnum, product, eups_version, deps)
@@ -312,7 +373,8 @@ if __name__ == "__main__":
 		for pi in products.itervalues():
 			if pi.product == 'sims_photUtils':
 				comment = ''
-			conda_version = "%s-%s_%s" % (pi.version, pi.build_string, pi.buildnum)
+			conda_version = "%s-%s_%s" % (pi.version, pi.build_string)
+			print pi.conda_name, conda_version, pi.product, pi.eups_version
 			print >>fp, comment + "rebuild %s %s %s %s" % (pi.conda_name, conda_version, pi.product, pi.eups_version)
 		print >>fp, "cat %(output_dir)s/*/binstar-upload.sh > %(output_dir)s/binstar-upload.sh" % { 'output_dir' : output_dir }
 		print >>fp, "echo \"To upload to anaconda.org, run 'bash %s/binstar-upload.sh'\"" % (output_dir)
