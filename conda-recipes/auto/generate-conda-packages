@@ -32,19 +32,24 @@ def eups_to_conda_version(version):
 
 	return version, buildnum
 
-def eups_to_conda_version_spec(product, version, build_string="py27", *_):
+def eups_to_conda_version_spec(conda_name, version, build_string="py27", *_):
 	version, buildnum = eups_to_conda_version(version)
 	if version != 'unknown':
-		return "%s %s %s_%s" % (product, version, build_string, buildnum)
+		return "%s %s %s_%s" % (conda_name, version, build_string, buildnum)
 	else:
-		return product
+		return conda_name
 
-def gen_conda_package(conda_name, version, sha1, giturl, build_deps=[], run_deps=[]):
+def gen_conda_package(product, sha, eups_version, eups_deps):
+	#
+	# process dependencies
+	#
+	if set(eups_deps) & internal_products:	# if we have any of the internal dependencies, make sure we depend on legacy_config where their .cfg and .table files are
+		eups_deps += [ 'legacy_configs' ]
+	deps =  [ eups_to_conda_map[prod] for prod in eups_deps if prod not in skip_products ]	# transform to Anaconda product names
+	deps += add_missing_deps(conda_name, output_dir)						# manually add any missing dependencies
 
-	dir = os.path.join(output_dir, conda_name)
-	os.makedirs(dir)
-
-	# flatten dependencies
+	# flatten dependencies to work around a Conda bug:
+	# https://github.com/conda/conda/issues/918
 	def flatten_deps(deps, seen=None):
 		if seen is None:
 			seen = set()
@@ -60,13 +65,14 @@ def gen_conda_package(conda_name, version, sha1, giturl, build_deps=[], run_deps
 					fdeps |= flatten_deps(pi.deps, seen)
 				seen.add(dep)
 		return fdeps
-#	print "DEPS BEFORE: ", sorted(build_deps)
-	build_deps = sorted(flatten_deps(build_deps))
-	run_deps   = sorted(flatten_deps(run_deps))
-#	print "DEPS AFTER:  ", build_deps
+	build_deps = sorted(flatten_deps(deps))
+	run_deps   = sorted(flatten_deps(deps))
+
+	# What do we call this product in conda?
+	conda_name = conda_name_for(product)
 
 	# parse version
-	version, buildnum = eups_to_conda_version(version)
+	version, buildnum = eups_to_conda_version(eups_version)
 
 	# meta.yaml
 	build_deps = [ eups_to_conda_version_spec(p, products[p].version, products[p].buildstring) if p in products else p for p in build_deps ]
@@ -74,6 +80,14 @@ def gen_conda_package(conda_name, version, sha1, giturl, build_deps=[], run_deps
 
 	build_req = create_deps_string(build_deps)
 	run_req   = create_deps_string(run_deps)
+
+	giturl = 'https://github.com/LSST/%s' % (product)
+
+	#
+	# Create the Conda packaging specs
+	#
+	dir = os.path.join(output_dir, conda_name)
+	os.makedirs(dir)
 
 	fill_out_template(os.path.join(dir, 'meta.yaml'), 'meta.yaml.template',
 		productNameLowercase = conda_name.lower(),
@@ -85,7 +99,7 @@ def gen_conda_package(conda_name, version, sha1, giturl, build_deps=[], run_deps
 		run_req = run_req,
 	)
 
-	# build.sh (TBD: use exact versions)
+	# build.sh (TBD: use exact eups versions, instead of -r .)
 	setups = []
 	SEP = 'setup '
 	setups = SEP + ('\n'+SEP).join(setups) if setups else ''
@@ -93,8 +107,12 @@ def gen_conda_package(conda_name, version, sha1, giturl, build_deps=[], run_deps
 	fill_out_template(os.path.join(dir, 'build.sh'), 'build.sh.template',
 		setups = setups
 	)
-	
-	return (build_deps, run_deps)
+
+	# deduce the build string
+	build_string = 'np19py27' if 'numpy' in (build_deps + run_deps) else 'py27'
+
+	# record we've seen this product
+	products[product] = ProductInfo(conda_name, version, build_string, deps)
 
 def load_manifest(fn):
 	with open(fn) as fp:
@@ -128,7 +146,7 @@ prefix_products = set("db".split())
 lsst_prefix="lsst-"
 
 # Missing dependencies (these would be transparently installed with pip otherwise)
-missing_deps = {
+missing_deps = { # map of conda_name -> [ (pkgtype, conda_name), ... ]
 	'pymssql'                  : [('conda', 'cython'), ('pypi', 'setuptools-git')],
 	'palpy'                    : [('conda', 'cython'), ('conda', 'numpy')],
 	'pyfits'                   : [('pypi', 'stsci.distutils')],
@@ -145,6 +163,11 @@ override_gitrev = {
 	'log': 'u/mjuric/DM-2995-fix-EINTR-in-testcase',
 	'ctrl_events': 'u/mjuric/osx-compatibility',
 	'ctrl_orca': 'u/mjuric/typo-fix-in-production_data'
+}
+
+# dict with transformations from EUPS to conda package names
+eups_to_conda_map = {
+	'legacy_configs' : 'legacy_configs'
 }
 
 def conda_package_exists(product):
@@ -199,11 +222,12 @@ def gen_pypi_package(name, products, workdir):
 	# delete what remains
 	shutil.rmtree(tmpdir)
 
-def add_missing_deps(product, workdir):
+def add_missing_deps(conda_name, workdir):
 	# inject missing dependencies, creating new conda packages if needed
+	# returns Conda package names
 	deps = []
-	for kind, dep in missing_deps.get(product, []):
-		print product, ':', kind, dep
+	for kind, dep in missing_deps.get(conda_name, []):
+		print conda_name, ':', kind, dep
 		{
 			'pypi': gen_pypi_package,
 			'conda': lambda dep, products, workdir: None
@@ -212,47 +236,27 @@ def add_missing_deps(product, workdir):
 
 	return deps
 
+def conda_name_for(product):
+	# return the conda package name for a product
+	conda_name = lsst_prefix + product if product in prefix_products else product
+	eups_to_conda_map[product] = conda_name
+	return conda_name
+
 if __name__ == "__main__":
-	#gen_conda_package('cfitsio', '3360.lsst1', '9799952d95ad6495ae9dac67c203ca9ec9369b1b', 'https://github.com/LSST/cfitsio', [], [])
-	#gen_conda_package('wcslib',  '4.14+7',     '98c01aeebcc86d55f6ceabbf0c5645632462d605', 'https://github.com/LSST/wcslib', ['cfitsio'], ['cfitsio'])
-	#gen_conda_package('eigen',   '3.2.0',      'e7c2993de8c624e968067861b71e3f7787c8b387', 'https://github.com/LSST/eigen')
-	#gen_conda_package('libevent','2.0.16-stable-1-g7e53c5e', '7e53c5e44cee47012e73e27766aaa5e8ca2dbe0f', 'https://github.com/LSST/libevent')
-
-
-	# Check which products are already in Anaconda
-	#for (product, sha, version, deps) in load_manifest('b1467.txt'):
-	#	print product, "EXISTS" if conda_package_exists(product) else ""
-
 	# Generate conda package files and build driver script
-	eups_to_conda = { 'legacy_configs' : 'legacy_configs' }
 	products = OrderedDict()
 	os.makedirs(output_dir)
 	with open(os.path.join(output_dir, "rebuild.sh"), "w") as fp:
 		print >>fp, "set -e"
 		for (product, sha, version, deps) in load_manifest('b1467.txt'):
-			# What do we call this product in conda?
-			conda_name = lsst_prefix + product if product in prefix_products else product
-			eups_to_conda[product] = conda_name
-
 			if product in internal_products: continue
 			if product in skip_products: continue
 
-			giturl = 'https://github.com/LSST/%s' % (product)
-
-			if set(deps) & internal_products:
-				deps += [ 'legacy_configs' ]
-
-			deps =  [ eups_to_conda[prod] for prod in deps if prod not in skip_products ]	# transform to Anaconda product names
-
-			deps += add_missing_deps(product, output_dir)
-
-			# override gitrevs (these are temporary hacks/fixes)
+			# override gitrevs (these are temporary hacks/fixes; they should go away when those branches are merged)
 			sha = override_gitrev.get(product, sha)
 
-			(build_deps, run_deps) = gen_conda_package(conda_name, version, sha, giturl, deps, deps)
+			gen_conda_package(product, sha, version, deps)
 
-			build_string = 'np19py27' if 'numpy' in (build_deps + run_deps) else 'py27'
-			products[product] = ProductInfo(conda_name, version, build_string, deps)
 
 		# write out the rebuild script
 		comment = '#'
