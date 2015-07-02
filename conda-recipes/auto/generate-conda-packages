@@ -61,7 +61,7 @@ eups_tags = [ 'current', 'conda', 'maf_b1467' ]
 
 # Override sha1s -- these are temporary hacks until the fixes below get merged
 override_gitrev = {
-	'sconsUtils':    'u/mjuric/relocation-fixes',
+	'sconsUtils':    'u/mjuric/osx-deployment-target',
 	'webservcommon': 'u/mjuric/DM-2993-never-depend-on-anaconda',
 	'healpy':        'u/mjuric/sanitize-flags',
 	'log':           'u/mjuric/DM-2995-fix-EINTR-in-testcase',
@@ -108,7 +108,7 @@ def eups_to_conda_version(product, eups_version):
 		if fixed_ver is not None:
 			vername = fixed_ver
 
-		return "%s.%s" % (vername, tagdist), "%s_%s" % (buildnum, sha1)
+		return "%s.%s" % (vername, tagdist), sha1
 
 	def parse_lsst_patchlevel(version):
 		# handle 1.2.3.lsst5 --> 1.2.3.5
@@ -116,36 +116,36 @@ def eups_to_conda_version(product, eups_version):
 		if not match: return None, None
 
 		true_ver, lsst_patch = match.groups()
-		return "%s.%s" % (true_ver, lsst_patch), 'build_%s' % buildnum
+		return "%s.%s" % (true_ver, lsst_patch), 'build'
 
 	def parse_branch_sha1(version):
 		match = re.match('^([^-]+)-g([0-9a-z]+)$', version)
 		if not match: return None, None
 
 		branch, sha1 = match.groups()
-		return "%s_g%s" % (branch, sha1), "%s_%s" % (buildnum, sha1)
+		return "%s_g%s" % (branch, sha1), sha1
 
 	def parse_default(version):
-		return version, 'build_%s' % buildnum
+		return version, 'build'
 
 	parsers  = special_version_parsers.get(product, [])
 	parsers += [ parse_full_version, parse_lsst_patchlevel, parse_branch_sha1, parse_default ]
 	for parser in parsers:
-		version, build_string = parser(raw_version)
+		version, build_string_prefix = parser(raw_version)
 		if version is not None:
+			build_string = '%s_%s' % (build_string_prefix, buildnum)
 			break
 
 	# remove any remaining '-'
 	if '-' in version:
 		version = version.replace('-', '_')
 
-#	print eups_version, " -> ", (version, build_string, buildnum)
 	return version, build_string, buildnum
 
 def conda_version_spec(conda_name):
 	pi = products[conda_name]
 	if pi.version is not None:
-		return "%s %s %s_%s" % (conda_name, pi.version, pi.build_string, pi.buildnum)
+		return "%s %s %s" % (conda_name, pi.version, pi.build_string)
 	else:
 		return conda_name
 
@@ -230,6 +230,11 @@ def gen_conda_package(product, sha, eups_version, eups_deps):
 	fill_out_template(os.path.join(dir, 'build.sh'), 'build.sh.template',
 		setups = setups,
 		eups_tags = ' '.join(eups_tags)
+	)
+
+	# pre-link.sh (to add the global tags)
+	fill_out_template(os.path.join(dir, 'pre-link.sh'), 'pre-link.sh.template',
+		product = product,
 	)
 
 	# record we've seen this product
@@ -347,7 +352,7 @@ if __name__ == "__main__":
 		if product not in manifest:
 			manifest[product] = products[product]
 
-	top_level = [ 'sims_maf' ]
+	top_level = [ 'wcslib' ]
 	for product in top_level:
 		bottom_up_add_to_manifest(product)
 
@@ -373,7 +378,7 @@ if __name__ == "__main__":
 		for pi in products.itervalues():
 			if pi.product == 'sims_photUtils':
 				comment = ''
-			conda_version = "%s-%s_%s" % (pi.version, pi.build_string)
+			conda_version = "%s-%s" % (pi.version, pi.build_string)
 			print pi.conda_name, conda_version, pi.product, pi.eups_version
 			print >>fp, comment + "rebuild %s %s %s %s" % (pi.conda_name, conda_version, pi.product, pi.eups_version)
 		print >>fp, "cat %(output_dir)s/*/binstar-upload.sh > %(output_dir)s/binstar-upload.sh" % { 'output_dir' : output_dir }

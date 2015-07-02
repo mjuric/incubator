@@ -105,3 +105,7 @@ for TAG in %(eups_tags)s; do
 
 	eups declare -t $TAG "$PRODUCT" "$PKG_VERSION"
 done
+
+# move the tags file to our ups dir; it will be merged by the pre-link.sh
+# script with the EUPS database when the package is installed
+mv "$TAGFILE" "$PREFIX/ups"
