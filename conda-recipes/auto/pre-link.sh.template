@@ -3,6 +3,7 @@
 # Fail immediately if anything's gone wrong
 set -e
 
+# Write into this file for anything that the user should see
 OUT="$PREFIX/.messages.txt"
 
 # Adjust SOURCE_DIR (for convenience)
@@ -10,7 +11,6 @@ SOURCE_DIR="$SOURCE_DIR/opt/lsst/%(product)s"
 
 # Add $PREFIX/bin to $PATH; it's not on the path when run
 # in _build environment (is this a bug in conda-build?)
-
 export PATH="$PREFIX/bin:$PATH"
 
 # initialize EUPS
@@ -20,9 +20,6 @@ source eups-setups.sh
 #
 TAGFILE="$EUPS_PATH/ups_db/global.tags"
 
-#TAGFILE=/Users/mjuric/projects/eups/stack/ups_db/global.tags
-#PREFIX="."
-
 # What the magic below does (in order):
 #   * cat both files, ensuring there's a newline between them
 #   * convert whitespaces to newlines
@@ -30,7 +27,6 @@ TAGFILE="$EUPS_PATH/ups_db/global.tags"
 #   * remove any empty lines
 #   * translate newlines back to whitespaces
 touch "$TAGFILE"						# make sure it exists
-#export >> "$OUT"
 awk 'FNR==1{print ""}1' "$SOURCE_DIR/ups/global.tags" "$TAGFILE" | 	\
 		tr ' ' '\n' | \
 		sort -u     | \
@@ -38,13 +34,5 @@ awk 'FNR==1{print ""}1' "$SOURCE_DIR/ups/global.tags" "$TAGFILE" | 	\
 		tr '\n' ' ' \
 		> "$TAGFILE".tmp
 
-#echo -n "Before: " >> "$OUT"
-#cat "$TAGFILE" >> "$OUT"
-#echo >> "$OUT"
-
-mv "$TAGFILE".tmp "$TAGFILE" >> "$OUT"
-
-#echo -n "After: " >> "$OUT"
-#cat "$TAGFILE" >> "$OUT"
-#echo >> "$OUT"
-
+# Move the new file into place
+mv "$TAGFILE".tmp "$TAGFILE"
