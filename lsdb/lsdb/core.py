@@ -78,6 +78,23 @@ class _Frame(dd.core._Frame, dd.core.OperatorMethodMixin):
             dsk, name, self._meta, self.divisions, self.hcmeta
         )
 
+    def __getitem__(self, key):
+        """
+        If the result is a new LSDB object (automatically
+        determined by dask based on the meta), then pass through the
+        HiPSCat metadata information.
+        """
+        result = super().__getitem__(key)
+        if isinstance(result, _Frame):
+            result.hcmeta = self.hcmeta
+        return result
+
+    def map_partitions(self, func, *args, **kwargs):
+        result = super().map_partitions(func, *args, **kwargs)
+        if isinstance(result, _Frame):
+            result.hcmeta = self.hcmeta
+        return result
+
 class LSDBDaskDataFrame(_Frame, dd.core.DataFrame):
     """Parallel GeoPandas GeoDataFrame
     Do not use this class directly. Instead use functions like
@@ -91,12 +108,16 @@ class LSDBDaskDataFrame(_Frame, dd.core.DataFrame):
         from dask.highlevelgraph import HighLevelGraph
         from dask.dataframe.core import DataFrame, Scalar
 
+        # scatter this in advance as HCMetadata.orders can get sizable
+        from dask.distributed import default_client
+        hcmeta = default_client().scatter(self.hcmeta)
+
         # partition writer
         data_write = ( self
                     .map_partitions(
                         io._writehips,
                             prefix=prefix, 
-                            hcmeta=self.hcmeta, 
+                            hcmeta=hcmeta, 
                             meta=pd.Series(dtype=object)
                     )
                 )
@@ -107,7 +128,7 @@ class LSDBDaskDataFrame(_Frame, dd.core.DataFrame):
             (final_name, 0): (
                 apply,
                     io._write_metadata,
-                    [ data_write.__dask_keys__(), prefix, self.hcmeta],
+                    [ data_write.__dask_keys__(), prefix, hcmeta],
                     {},
             )
         }
@@ -120,10 +141,19 @@ class LSDBDaskDataFrame(_Frame, dd.core.DataFrame):
         return out
     
 from dask.dataframe.dispatch import make_meta_dispatch
+
 @make_meta_dispatch.register(LDataFrame)
 def make_meta_dataframe(df, index=None):
     df = df.iloc[:0]
     return df
+
+from dask.dataframe.utils import meta_nonempty
+from dask.dataframe.backends import meta_nonempty_dataframe
+@meta_nonempty.register(LDataFrame)
+def _nonempty_geodataframe(x):
+    df = meta_nonempty_dataframe(x)
+    return LDataFrame(df)
+
 
 from dask.dataframe.core import get_parallel_type
 get_parallel_type.register(LDataFrame, lambda _: LSDBDaskDataFrame);

@@ -6,7 +6,7 @@ from .dataframe import LDataFrame
 
 def _writehips(df, prefix, hcmeta):
     if len(df) == 0:
-        return ""
+        return None
 
     # get the partition index
     if True: # this whole bit is for debugging
@@ -31,7 +31,10 @@ def _write_metadata(parts, prefix, hcmeta):
 
     # construct an updated coverage map
     opix = defaultdict(list)
-    for (outfile, (imin, imax, len_), (order, ipix)) in parts:
+    for metadata in parts:
+        if metadata is None:  # empty partition
+            continue
+        (outfile, (imin, imax, len_), (order, ipix)) = metadata
         opix[int(order)].append(int(ipix))
     opix = dict(opix)
 
