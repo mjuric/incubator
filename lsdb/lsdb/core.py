@@ -158,15 +158,15 @@ def _nonempty_geodataframe(x):
 from dask.dataframe.core import get_parallel_type
 get_parallel_type.register(LDataFrame, lambda _: LSDBDaskDataFrame);
 
-def _add_index_column(df):
-    df["_ID"] = hc.compute_hcidx(df["ra"].values, df["dec"].values)
+def _add_index_column(df, lon, lat):
+    df["_ID"] = hc.compute_hcidx(df[lon].values, df[lat].values)
     return df
 
 def _construct_from_dask(ddf, hcmeta):
     divisions = hcmeta.compute_divisions().tolist()
     ldf = (
         ddf
-            .map_partitions(_add_index_column)   ## FIXME: this will break if input partitions overlap
+            .map_partitions(_add_index_column, hcmeta.lon, hcmeta.lat)   ## FIXME: this will break if input partitions overlap
             .set_index("_ID", divisions=divisions)
             .map_partitions(LDataFrame)
     )
@@ -179,7 +179,7 @@ def from_dask(ddf, *, lon="ra", lat="dec", threshold=None, counts_df=None, hcmet
             counts_df = ddf
 
         # compute the skymap and convert it to partitioning
-        m = compute_skymap(counts_df)
-        hcmeta = hc.HCMetadata.from_skymap(m)
+        m = compute_skymap(counts_df, lon=lon, lat=lat)
+        hcmeta = hc.HCMetadata.from_skymap(m, lon=lon, lat=lat, threshold=threshold)
 
     return _construct_from_dask(ddf, hcmeta)
