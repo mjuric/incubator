@@ -180,15 +180,15 @@ class MockLinker:
 
         return discoveryObservationId, discoverySubmissionDate, discoveryChances
 
-    def _link_chunk(self, chunk_begin, chunksize=None):
-        if chunksize is None:
-            chunksize = self._chunksize
+    def _link_chunk(self, chunk_begin):
+        # HACK: get arrays from global memory
         dia, obj2dia = __dia, __obj2dia		# inputs (fetch from global vars)
 
         # iterate through objects in this chunk
+        chunksize = self._chunksize
         begin = chunk_begin
         end   = min(begin + chunksize, len(obj2dia))
-        obj   = self.outarray(end - begin)	# outputs
+        obj   = self.outarray(end - begin)
         for i, k in enumerate(range(begin, end)):
             obsv = dia[["diaSourceId", "midPointTai", "ra", "decl"]][obj2dia[k]]
             row = obj[i]
@@ -200,7 +200,7 @@ class MockLinker:
         if obj is None:
             obj = self.outarray(len(obj2dia))
 
-        # store the args into globals so they don't get pickled &
+        # HACK: store the args into globals so they don't get pickled &
         # are seen by the workers after fork()
         global __dia, __obj2dia
         __dia, __obj2dia = dia, obj2dia
@@ -235,16 +235,6 @@ class MockLinker:
                 pbar.close()
 
         return obj
-
-def to_shared_memory(arr):
-    """ copy array into shared memory that will be inherited by child
-    processes """
-
-    mm = mmap.mmap(-1, arr.nbytes, flags=mmap.MAP_SHARED)
-    mmarr = np.ndarray(shape=arr.shape, dtype=arr.dtype, buffer=mm)
-    mmarr[:] = arr[:]
-    
-    return mmarr
 
 config = dict(
     seed=0,

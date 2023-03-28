@@ -61,7 +61,7 @@ def openOrCreateArray(dbfn, mode="r", nrows=None, dtype=None, clobber=False):
 if __name__ == "__main__":
     # flip this to True to store the output, if you have permissions to
     # write to {output_dir}/ssObject.npy (i.e., if you're mjuric).
-    storeResult = False
+    storeResult = True
 
     config = dict(
         seed=0,
