@@ -182,7 +182,7 @@ class MockLinker:
 
     def _link_chunk(self, chunk_begin):
         # HACK: get arrays from global memory
-        dia, obj2dia = __dia, __obj2dia		# inputs (fetch from global vars)
+        dia, obj2dia = _g_dia, _g_obj2dia		# inputs (fetch from global vars)
 
         # iterate through objects in this chunk
         chunksize = self._chunksize
@@ -202,15 +202,20 @@ class MockLinker:
 
         # HACK: store the args into globals so they don't get pickled &
         # are seen by the workers after fork()
-        global __dia, __obj2dia
-        __dia, __obj2dia = dia, obj2dia
+        global _g_dia, _g_obj2dia
+        _g_dia, _g_obj2dia = dia, obj2dia
 
         self._chunksize = chunksize
 
         p = pbar = None
         try:
             if nworkers != 1:
-                from multiprocessing import Pool
+                # need to ensure we fork, rather than spawn, because we're passing
+                # data to workers through global _g_* variables. MacOS and Windows
+                # spawn by default, UNIX forks.
+                import multiprocessing
+                Pool = multiprocessing.get_context("fork").Pool
+
                 print(f"Launching nworkers={nworkers} pool...", end='')
                 p = Pool(nworkers)
                 map = p.imap_unordered
@@ -248,19 +253,48 @@ config = dict(
 
 if __name__ == "__main__":
 
-    import pandas as pd
-    df = pd.read_csv("test_obsv.csv")
-    obsv = np.asarray(df.to_records(index=False))
+    def load_test_dataset(fn="test_obsv.csv", ncopies=1):
+        import pandas as pd
+        df = pd.read_csv(fn)
 
+        # replicate
+        dfs = [ ]
+        for i in range(ncopies):
+            df2 = df.copy()
+            if i != 0:
+                df2["_name"] += f"_{i}"
+            dfs += [ df2 ]
+        df = pd.concat(dfs)
+        return df
+
+    df = load_test_dataset(ncopies=1)
+
+    # convert to (an efficiently packed) ndarray
+    print(df[-10:])
+    nameLen = df["_name"].str.len().max()
+    obsv = np.asarray(df.to_records(index=False, column_dtypes=dict(_name=f'a{nameLen}', diaSourceId='u8', midPointTai='f8', ra='f8', decl='f8')))
+    del df
+    print(f"{obsv.dtype=} {len(obsv)}=")
+
+    # group-by
+    import time
+    start = time.perf_counter()
     # create the "group by" splits for individual objects 
     # See https://stackoverflow.com/a/43094244 for inspiration for this code
     i = np.argsort(obsv["_name"], kind='stable')
     ssObjects, idx = np.unique(obsv["_name"][i], return_index=True)
     splits = np.split(i, idx[1:])
+    print(f"{len(ssObjects)=}")
+
+    end = time.perf_counter()
+    print(f"Group-by time: {end-start:.3f} seconds")
 
     # "link"
     from tqdm import tqdm
     linker = MockLinker(config)
-    obj = linker.link_all(obsv, splits, chunksize=10, tqdm=tqdm, nworkers=6)
+    obj = linker.link_all(obsv, splits, chunksize=10000, tqdm=tqdm, nworkers=1)
+
+    end = time.perf_counter()
+    print(f"Total execution time: {end-start:.3f} seconds")
 
     print("Found:", (~np.isnan(obj["discoverySubmissionDate"])).sum())
