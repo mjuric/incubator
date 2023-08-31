@@ -129,14 +129,15 @@ def discoveryOpportunities(nights, nightHasTracklets, window, nlink, p, seed):
 
     return discIdx, disc
 
-def computeDiscovery(night, obsv, seed, maxdt_minutes=90, minlen_arcsec=1., window=14, nlink=3, p=0.95):
-    discoveryObservationId = -1
+def linkObject(obsv, seed, maxdt_minutes=90, minlen_arcsec=1., window=14, nlink=3, p=0.95):
+    discoveryObservationId = 0xFFFF_FFFF_FFFF_FFFF
     discoverySubmissionDate = np.nan
     discoveryChances = 0
 
     if len(obsv):
         i = np.argsort(obsv["midPointTai"])
-        night, obsv = night[i], obsv[i]
+        obsv = obsv[i]
+        night = obsv["midPointTai"].astype(int)  ## FIXME: works only for LSST
         mjd, ra, dec, diaSourceId = obsv["midPointTai"], obsv["ra"], obsv["decl"], obsv["diaSourceId"]
 
         # compute a random seed for this object, based on the hash of its (sorted) data
@@ -160,86 +161,65 @@ def computeDiscovery(night, obsv, seed, maxdt_minutes=90, minlen_arcsec=1., wind
 
     return discoveryObservationId, discoverySubmissionDate, discoveryChances
 
+def linkObservations(obsv, objectId="ssObjectId", sourceId="diaSourceId", mjdTime="midPointTai", ra="ra", dec="decl"):
+    # expects a ndarray of observations, with the following columns:
+    #
+    #  - objectId: a unique ID of the solar system object
+    #  - sourceId: a unique ID of the observation
+    #  - mjdTime:  time of the observation (midpoint), MJD, UTC
+    #  - ra:       R.A. of the observation (J2000)
+    #  - dec:      Declination of the observation (J2000)
+    #
+    # The names of these columns can be overridden with optional arguments
+    #
+    # output: an ndarray with one row per /detected/ object, containing the
+    #         following columns:
+    #
+    #  - ssObjectId:              the objectId of this object
+    #  - discoveryObservationId:  the sourceId of the observation that triggered a succesful linkage
+    #  - discoverySubmissionDate: the submission date of the 
+    #  - discoveryChances:        the number of discovery chances for this objects
+    #
+
+    # group-by
+    import time
+    start = time.perf_counter()
+    # create the "group by" splits for individual objects 
+    # See https://stackoverflow.com/a/43094244 for inspiration for this code
+    i = np.argsort(obsv[objectId], kind='stable')
+    ssObjects, idx = np.unique(obsv[objectId][i], return_index=True)
+    splits = np.split(i, idx[1:])
+    print(f"{len(ssObjects)=}")
+
+    end = time.perf_counter()
+    print(f"Group-by time: {end-start:.3f} seconds")
+
+    # "link"
+    # pre-initialize output columns
+    obj = np.zeros(len(splits), dtype=np.dtype([
+        ("ssObjectId", obsv[objectId].dtype),
+        ("discoveryObservationId", "u8"),
+        ("discoverySubmissionDate", "f8"),
+        ("discoveryChances", "i4")
+    ]))
+
+    # linking test for each object
+    for k, obsv_indices in enumerate(splits):
+        # extract the observations of this object into a ndarray of expected
+        # format and column names
+        thisObsv = obsv[[sourceId, mjdTime, ra, dec]][obsv_indices]
+        thisObsv.dtype.names = ["diaSourceId", "midPointTai", "ra", "decl"]
+
+        obj[k] = (ssObjects[k], *linkObject(thisObsv, **config))
+
+    print(obj["discoveryObservationId"])
+
+    end = time.perf_counter()
+    print(f"Total linking time: {end-start:.3f} seconds")
+
+    return obj
+
 ###########################################################
-
-class MockLinker:
-    def __init__(self, config):
-        self.config = config
-
-    def outarray(self, nrows):
-        return np.zeros(nrows, dtype=np.dtype([
-            ("discoverySubmissionDate", "f8"),
-            ("MOID", "f4")
-        ]))
-
-    def link(self, obsv):
-        # input rows (the observations)
-        night = obsv["midPointTai"].astype(int)
-
-        discoveryObservationId, discoverySubmissionDate, discoveryChances = computeDiscovery(night, obsv, **self.config)
-
-        return discoveryObservationId, discoverySubmissionDate, discoveryChances
-
-    def _link_chunk(self, chunk_begin):
-        # HACK: get arrays from global memory
-        dia, obj2dia = _g_dia, _g_obj2dia		# inputs (fetch from global vars)
-
-        # iterate through objects in this chunk
-        chunksize = self._chunksize
-        begin = chunk_begin
-        end   = min(begin + chunksize, len(obj2dia))
-        obj   = self.outarray(end - begin)
-        for i, k in enumerate(range(begin, end)):
-            obsv = dia[["diaSourceId", "midPointTai", "ra", "decl"]][obj2dia[k]]
-            row = obj[i]
-            discoveryObservationId, row["discoverySubmissionDate"], row["MOID"] = self.link(obsv)
-
-        return chunk_begin, obj
-
-    def link_all(self, dia, obj2dia, nworkers=1, chunksize=1_000, tqdm=None, obj=None):
-        if obj is None:
-            obj = self.outarray(len(obj2dia))
-
-        # HACK: store the args into globals so they don't get pickled &
-        # are seen by the workers after fork()
-        global _g_dia, _g_obj2dia
-        _g_dia, _g_obj2dia = dia, obj2dia
-
-        self._chunksize = chunksize
-
-        p = pbar = None
-        try:
-            if nworkers != 1:
-                # need to ensure we fork, rather than spawn, because we're passing
-                # data to workers through global _g_* variables. MacOS and Windows
-                # spawn by default, UNIX forks.
-                import multiprocessing
-                Pool = multiprocessing.get_context("fork").Pool
-
-                print(f"Launching nworkers={nworkers} pool...", end='')
-                p = Pool(nworkers)
-                map = p.imap_unordered
-                print("done.")
-            else:
-                import builtins
-                map = builtins.map
-
-            if tqdm:
-                pbar = tqdm(total=len(obj2dia))
-
-            for chunk_begin, chunk in map(self._link_chunk, range(0, len(obj2dia), chunksize)):
-                # paste the output chunk into the right place
-                obj[chunk_begin:chunk_begin + len(chunk)][list(chunk.dtype.fields.keys())] = chunk
-
-                pbar.update(len(chunk))
-        finally:
-            if p:
-                p.terminate()
-                del p
-            if pbar:
-                pbar.close()
-
-        return obj
 
 config = dict(
     seed=0,
@@ -252,9 +232,9 @@ config = dict(
 )
 
 if __name__ == "__main__":
+    import pandas as pd
 
     def load_test_dataset(fn="test_obsv.csv", ncopies=1):
-        import pandas as pd
         df = pd.read_csv(fn)
 
         # replicate
@@ -267,34 +247,38 @@ if __name__ == "__main__":
         df = pd.concat(dfs)
         return df
 
-    df = load_test_dataset(ncopies=1)
+    ncopies=100
+    df = load_test_dataset(ncopies=ncopies)
 
-    # convert to (an efficiently packed) ndarray
+    # convert to (an efficiently packed) ndarray that linkObservations expects
     print(df[-10:])
     nameLen = df["_name"].str.len().max()
     obsv = np.asarray(df.to_records(index=False, column_dtypes=dict(_name=f'a{nameLen}', diaSourceId='u8', midPointTai='f8', ra='f8', decl='f8')))
     del df
-    print(f"{obsv.dtype=} {len(obsv)}=")
+    print(f"{obsv.dtype=}\n{len(obsv)=}")
 
-    # group-by
+    # go!
+    obj = linkObservations(obsv, objectId="_name")
+
+    # print some nice results
+    print("Found:", (~np.isnan(obj["discoverySubmissionDate"])).sum())
+    objsample = pd.DataFrame(obj[::ncopies][:10])
+    print(objsample)
+
+    # filter out the observations of objects that weren't found
     import time
     start = time.perf_counter()
-    # create the "group by" splits for individual objects 
-    # See https://stackoverflow.com/a/43094244 for inspiration for this code
-    i = np.argsort(obsv["_name"], kind='stable')
-    ssObjects, idx = np.unique(obsv["_name"][i], return_index=True)
-    splits = np.split(i, idx[1:])
-    print(f"{len(ssObjects)=}")
-
+    found = obj["ssObjectId"][ ~np.isnan(obj["discoverySubmissionDate"]) ]
+    obsv_found = obsv[ np.isin(obsv["_name"], found) ]
     end = time.perf_counter()
-    print(f"Group-by time: {end-start:.3f} seconds")
+    print(f"Observation filtering time: {end-start:.3f} seconds")
+    print(pd.DataFrame(obsv_found[ np.isin(obsv_found["_name"], objsample["ssObjectId"]) ]).groupby("_name").count())
 
-    # "link"
-    from tqdm import tqdm
-    linker = MockLinker(config)
-    obj = linker.link_all(obsv, splits, chunksize=10000, tqdm=tqdm, nworkers=1)
+    # basic sanity checks
+    obsv_missed = obsv[ ~np.isin(obsv["_name"], found) ]
+    print(f"{len(obsv_found)=}")
+    print(f"{len(obsv_missed)=}")
+    assert len(obsv_found) + len(obsv_missed) == len(obsv)
 
-    end = time.perf_counter()
-    print(f"Total execution time: {end-start:.3f} seconds")
-
-    print("Found:", (~np.isnan(obj["discoverySubmissionDate"])).sum())
+    # done
+    print("done.")
