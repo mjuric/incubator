@@ -1,0 +1,52 @@
+#
+# create a directory for the demo, in your home dir
+#
+cd ~
+mkdir demo
+cd demo
+
+#
+# install miniconda (a minimal Python conda distribution)
+#
+curl -O https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+  # ☝️: when prompted, install it to ~/demo/miniconda3
+eval "$(~/demo/miniconda3/bin/conda shell.bash hook)"
+
+#
+# install the tools we'll need
+#
+conda install -c conda-forge mamba
+mamba install -c conda-forge conda-build anaconda-client grayskull
+
+#
+# create the recipe using grayskull
+#
+mkdir recipes
+cd recipes/
+grayskull pypi https://github.com/mjuric/hipscat
+cd hipscat
+
+#
+# build the package
+#
+conda build -c conda-forge .
+
+#
+# inspect the tarball (just for fun)
+#
+tar tjvf /home/mjuric/demo/miniconda3/conda-bld/noarch/hipscat-0.2.1-py_0.tar.bz2
+
+#
+# upload it to your channel
+#
+anaconda login
+anaconda upload /home/mjuric/demo/miniconda3/conda-bld/noarch/hipscat-0.2.1-py_0.tar.bz2
+mamba search -c mjuric hipscat
+
+#
+# convince yourself that it worked
+#
+mamba create -c mjuric -c conda-forge -n hipscat-test hipscat
+conda activate hipscat-test
+python -c "import hipscat._version as hc; print(f'Hipscat v{hc.__version__} successfully installed.')"
