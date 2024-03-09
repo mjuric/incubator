@@ -84,6 +84,7 @@ def cart_to_sph(xyz):
 
     r = np.sqrt(x**2 + y**2 + z**2)
     ra = np.rad2deg( np.arctan2(y, x) )
+    ra[ra < 0] = ra[ra < 0] + 360
     dec = np.rad2deg( np.arcsin(z/r) )
 
     return ra, dec
@@ -104,11 +105,36 @@ def decompress(t_mjd, comps, return_ephem=False):
     else:
         return objects, xyz, cart_to_sph(xyz)
 
+def merge_comps(compslist):
+    # verify tmin/tmax are the same everywhere
+    for i, comps in enumerate(compslist):
+        assert comps[0] == compslist[0][0], f"Interpolation limits don't match, {comps[0]} != {compslist[0][0]} at index={i}"
+        assert np.all(comps[1] == compslist[0][1]), f"Observer location chebys don't match, {comps[2]} != {compslist[0][2]} at index={i}"
+    (tmin, tmax), op, _, _ = comps
+
+    p = [ comps[2] for comps in compslist]
+    p = np.concatenate(p, axis=2)
+
+    # convert to a string ndarray
+    from itertools import chain
+    objects = [ comps[3] for comps in compslist ]
+    objects = list(chain(*objects))
+    objects = np.asarray(objects)
+
+    return (tmin, tmax), op, p, objects
+
 def write_comps(fp, comps):
     import pickle
     pickle.dump(comps, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
-if __name__ == "__main__":
+def read_comps(fp):
+    import pickle
+    return pickle.load(fp)
+
+def _single_thread_compress():
+    #
+    # Delete this at some point...
+    #
     import time
     t0 = time.time()
     print("loading...", end='', flush=True)
@@ -163,6 +189,58 @@ if __name__ == "__main__":
     duration = time.time() - t0
     print(f" done [max on-sky error={dd.max()*1000:.2f}mas] [{duration:.2f}sec]")
 
+
+def _aux_compress(fn, night0, verify=True, tolerance_arcsec=1):
+    df_all = pd.read_hdf(fn)
+
+    # Extract a dataframe only for the specific night,
+    # or (if night hasn't been given) verify the input only has a single night
+    nights = utc_to_night(df_all["FieldMJD_TAI"].values)
+    m = nights == night0
+    df = df_all[m]
+    nights = nights[m]
+    assert np.all(nights == night0), "All inputs must come from the same night"
+
+    comps = compress(df)
+
+    if verify:
+        # extract visit times for this night
+        m = utc_to_night(df_all["FieldMJD_TAI"].values) == night0
+        df2 = df_all[m].sort_values(["ObjID", "FieldMJD_TAI"])
+        t = df2["FieldMJD_TAI"].values[ df2["ObjID"] == df2["ObjID"].iloc[0] ]
+        ra  = df2['AstRA(deg)'].values
+        dec = df2['AstDec(deg)'].values
+        objects, _, (ra2, dec2) = decompress(t, comps, return_ephem=True)
+        ra2, dec2 = ra2.flatten(), dec2.flatten()
+        dd = haversine(ra2, dec2, ra, dec)*3600
+        assert dd.max() < tolerance_arcsec
+
+    return comps
+
+def fit_many(fns, night0, ncores):
+    from tqdm import tqdm
+    from functools import partial
+    from multiprocessing import Pool
+    with Pool(processes=ncores) as pool:
+        allcomps = [ comp for comp in tqdm(pool.imap(partial(_aux_compress, night0=night0), fns), total=len(fns)) ]
+
+    return merge_comps(allcomps)
+
+def cmd_compress(args):
+    import time
+
+    night0 = 60851
+    outfn = args.output # f'cache.mjd={night0}.pkl'
+    fns = args.ephem_file # '/astro/store/epyc3/data3/jake_dp03/for_mario/mpcorb_eph_*.hdf')
+    ncores = args.j
+
+    comps = fit_many(fns, night0, ncores=ncores)
+
+    with open(outfn, "wb") as fp:
+        write_comps(fp, comps)
+    import os
+    print(f"wrote {outfn} [ size={os.stat(outfn).st_size:,}]")
+
     # decompress for a single time
     print("single decompress (no ephem)...", end='')
     t0 = time.time()
@@ -171,3 +249,81 @@ if __name__ == "__main__":
     print(f" done [{duration:.2f}sec]")
 
     print("Success!")
+
+def cmd_query(args):
+    with open(args.cache, "rb") as fp:
+        comps = read_comps(fp)
+
+    import json
+
+    # performance
+    import time
+    t0 = time.perf_counter()
+
+    # decompress for a single time
+    objects, xyz = decompress(args.t, comps, return_ephem=False)
+
+    # turn to a unit vector
+    r = np.sqrt((xyz*xyz).sum(axis=0))
+    xyz /= r
+
+    # query the position via dot-product
+    ra_rad, dec_rad = np.radians(args.ra), np.radians(args.dec)
+    pointing = np.asarray([ np.cos(dec_rad) * np.cos(ra_rad), np.cos(dec_rad) * np.sin(ra_rad), np.sin(dec_rad) ])
+    cos_radius = np.cos(np.radians(args.radius))
+    dotprod = (xyz.T*pointing).sum(axis=1)
+    mask = dotprod > cos_radius
+
+    # select the results
+    name, (ra, dec) = objects[mask], cart_to_sph(xyz[:, mask])
+    
+    # Try JSON serialization
+#    js = json.dumps({'name': name.tolist(), 'ra:': ra.tolist(), 'dec': dec.tolist()})
+
+    duration = time.perf_counter() - t0
+
+    # print the results
+    dist = haversine(ra, dec, args.ra, args.dec)
+    print("#   object            ra           dec          dist")
+    for n, r, d, dd in zip(name, ra, dec, dist):
+        print(f"{n:10s} {r:13.8f} {d:13.8f} {dd:13.8f}")
+    assert np.all(dist <= args.radius)
+    print(f"# objects: {len(name)}")
+    print(f"# compute time: {duration:.2f}sec")
+#    print(js)
+
+#    print(f"{name.shape=} {ra.shape=} {dec.shape=}")
+#    print(f"{xyz.shape=} {dotprod.shape=} {mask.sum()=} {cos_radius=}")
+
+def main():
+    import argparse
+
+    # Create the top-level parser
+    parser = argparse.ArgumentParser(description='Asteroid Checker.')
+    subparsers = parser.add_subparsers(dest='command', required=True, help='Subcommands')
+
+    # Create the parser for the "compress" command
+    parser_compress = subparsers.add_parser('compress', help='Compress ephemerides files.')
+    parser_compress.add_argument('ephem_file', type=str, nargs='+', help='T')
+    parser_compress.add_argument('-j', type=int, default=1, help='Run multithreaded')
+    parser_compress.add_argument('--output', type=str, required=True, help='Output file name.')
+
+    # Create the parser for the "query" command
+    parser_query = subparsers.add_parser('query', help='Query data')
+    parser_query.add_argument('t', type=float, help='Time (MJD, UTC)')
+    parser_query.add_argument('ra', type=float, help='Right ascension (degrees)')
+    parser_query.add_argument('dec', type=float, help='Declination (degrees)')
+    parser_query.add_argument('--radius', type=float, default=1, help='Search radius (degrees)')
+    parser_query.add_argument('--cache', type=str, required=True, help='Cache file')
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    # Check which command is being requested and call the appropriate function/handler
+    if args.command == 'compress':
+        cmd_compress(args)
+    elif args.command == 'query':
+        cmd_query(args)
+
+if __name__ == '__main__':
+    main()
