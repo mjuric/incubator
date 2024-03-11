@@ -190,23 +190,19 @@ def _single_thread_compress():
     print(f" done [max on-sky error={dd.max()*1000:.2f}mas] [{duration:.2f}sec]")
 
 
-def _aux_compress(fn, night0, verify=True, tolerance_arcsec=1):
-    df_all = pd.read_hdf(fn)
+def _aux_compress(fn, verify=True, tolerance_arcsec=1):
+    df = pd.read_hdf(fn)
 
     # Extract a dataframe only for the specific night,
     # or (if night hasn't been given) verify the input only has a single night
-    nights = utc_to_night(df_all["FieldMJD_TAI"].values)
-    m = nights == night0
-    df = df_all[m]
-    nights = nights[m]
-    assert np.all(nights == night0), "All inputs must come from the same night"
+    nights = utc_to_night(df["FieldMJD_TAI"].values)
+    assert np.all(nights == nights[0]), "All inputs must come from the same night"
 
     comps = compress(df)
 
     if verify:
         # extract visit times for this night
-        m = utc_to_night(df_all["FieldMJD_TAI"].values) == night0
-        df2 = df_all[m].sort_values(["ObjID", "FieldMJD_TAI"])
+        df2 = df.sort_values(["ObjID", "FieldMJD_TAI"])
         t = df2["FieldMJD_TAI"].values[ df2["ObjID"] == df2["ObjID"].iloc[0] ]
         ra  = df2['AstRA(deg)'].values
         dec = df2['AstDec(deg)'].values
@@ -217,24 +213,23 @@ def _aux_compress(fn, night0, verify=True, tolerance_arcsec=1):
 
     return comps
 
-def fit_many(fns, night0, ncores):
+def fit_many(fns, ncores):
     from tqdm import tqdm
     from functools import partial
     from multiprocessing import Pool
     with Pool(processes=ncores) as pool:
-        allcomps = [ comp for comp in tqdm(pool.imap(partial(_aux_compress, night0=night0), fns), total=len(fns)) ]
+        allcomps = [ comp for comp in tqdm(pool.imap(_aux_compress, fns), total=len(fns)) ]
 
     return merge_comps(allcomps)
 
 def cmd_compress(args):
     import time
 
-    night0 = 60851
     outfn = args.output # f'cache.mjd={night0}.pkl'
     fns = args.ephem_file # '/astro/store/epyc3/data3/jake_dp03/for_mario/mpcorb_eph_*.hdf')
     ncores = args.j
 
-    comps = fit_many(fns, night0, ncores=ncores)
+    comps = fit_many(fns, ncores=ncores)
 
     with open(outfn, "wb") as fp:
         write_comps(fp, comps)
@@ -244,7 +239,7 @@ def cmd_compress(args):
     # decompress for a single time
     print("single decompress (no ephem)...", end='')
     t0 = time.time()
-    decompress(night0+1.1, comps, return_ephem=False)
+    decompress((comps[0][0] + comps[0][1])/2, comps, return_ephem=False)
     duration = time.time() - t0
     print(f" done [{duration:.2f}sec]")
 
